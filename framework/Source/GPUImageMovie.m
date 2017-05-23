@@ -30,6 +30,8 @@
     BOOL isFullYUVRange;
 
     int imageBufferWidth, imageBufferHeight;
+    
+    double _startLoc;
 }
 
 - (void)processAsset;
@@ -60,6 +62,8 @@
     self.url = url;
     self.asset = nil;
 
+    _startLoc = 70;
+    
     return self;
 }
 
@@ -160,6 +164,7 @@
 
 - (void)startProcessing
 {
+    
     if( self.playerItem ) {
         [self processPlayerItem];
         return;
@@ -172,11 +177,15 @@
     
     if (_shouldRepeat) keepLooping = YES;
     
-    previousFrameTime = kCMTimeZero;
-    previousActualFrameTime = CFAbsoluteTimeGetCurrent();
+    
   
     NSDictionary *inputOptions = [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey];
     AVURLAsset *inputAsset = [[AVURLAsset alloc] initWithURL:self.url options:inputOptions];
+    
+    
+    previousFrameTime = CMTimeMake(_startLoc * inputAsset.duration.timescale,inputAsset.duration.timescale);
+    NSLog(@"FIRST previousFrameTime = %@",@(CMTimeGetSeconds(previousFrameTime)));
+    previousActualFrameTime = CFAbsoluteTimeGetCurrent()-_startLoc;
     
     GPUImageMovie __block *blockSelf = self;
     
@@ -200,6 +209,8 @@
     NSError *error = nil;
     AVAssetReader *assetReader = [AVAssetReader assetReaderWithAsset:self.asset error:&error];
 
+    assetReader.timeRange = CMTimeRangeMake(CMTimeMake(_startLoc, self.asset.duration.timescale), kCMTimePositiveInfinity);
+    
     NSMutableDictionary *outputSettings = [NSMutableDictionary dictionary];
     if ([GPUImageContext supportsFastTextureUpload]) {
         [outputSettings setObject:@(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) forKey:(id)kCVPixelBufferPixelFormatTypeKey];
@@ -286,12 +297,15 @@
     {
         while (reader.status == AVAssetReaderStatusReading && (!_shouldRepeat || keepLooping))
         {
+            
+            NSLog(@"BWHILE");
                 [weakSelf readNextVideoFrameFromOutput:readerVideoTrackOutput];
 
             if ( (readerAudioTrackOutput) && (!audioEncodingIsFinished) )
             {
                     [weakSelf readNextAudioSampleFromOutput:readerAudioTrackOutput];
             }
+            NSLog(@"EWHILE");
 
         }
 
@@ -302,6 +316,7 @@
             if (keepLooping) {
                 reader = nil;
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    _startLoc = 80;
                     [self startProcessing];
                 });
             } else {
@@ -416,14 +431,27 @@ static CVReturn renderCallback(CVDisplayLinkRef displayLink,
 {
     if (reader.status == AVAssetReaderStatusReading && ! videoEncodingIsFinished)
     {
-        CMSampleBufferRef sampleBufferRef = [readerVideoTrackOutput copyNextSampleBuffer];
-        if (sampleBufferRef) 
+        CMTime currentSampleTime;
+        CMSampleBufferRef sampleBufferRef = NULL;
+        do {
+            if (sampleBufferRef) {
+                CMSampleBufferInvalidate(sampleBufferRef);
+                CFRelease(sampleBufferRef);
+            }
+        sampleBufferRef = [readerVideoTrackOutput copyNextSampleBuffer];
+        currentSampleTime = CMSampleBufferGetOutputPresentationTimeStamp(sampleBufferRef);
+            NSLog(@"NO %@ - %@",@(CMTimeGetSeconds(currentSampleTime)),@(CMTimeGetSeconds(previousFrameTime)));
+        } while(sampleBufferRef && CMTimeCompare(currentSampleTime, previousFrameTime) < 0);
+        
+        if (sampleBufferRef)
         {
-            //NSLog(@"read a video frame: %@", CFBridgingRelease(CMTimeCopyDescription(kCFAllocatorDefault, CMSampleBufferGetOutputPresentationTimeStamp(sampleBufferRef))));
+            NSLog(@"%@",@(CMTimeGetSeconds(currentSampleTime)));
+            NSLog(@"read a video frame: %@", CFBridgingRelease(CMTimeCopyDescription(kCFAllocatorDefault, CMSampleBufferGetOutputPresentationTimeStamp(sampleBufferRef))));
             if (_playAtActualSpeed)
             {
                 // Do this outside of the video processing queue to not slow that down while waiting
-                CMTime currentSampleTime = CMSampleBufferGetOutputPresentationTimeStamp(sampleBufferRef);
+                
+                
                 CMTime differenceFromLastFrame = CMTimeSubtract(currentSampleTime, previousFrameTime);
                 CFAbsoluteTime currentActualTime = CFAbsoluteTimeGetCurrent();
                 
@@ -433,6 +461,8 @@ static CVReturn renderCallback(CVDisplayLinkRef displayLink,
                 if (frameTimeDifference > actualTimeDifference)
                 {
                     usleep(1000000.0 * (frameTimeDifference - actualTimeDifference));
+                } else {
+                    NSLog(@"frameTimeDifference = %@",@(frameTimeDifference));
                 }
                 
                 previousFrameTime = currentSampleTime;
@@ -445,7 +475,6 @@ static CVReturn renderCallback(CVDisplayLinkRef displayLink,
                 CMSampleBufferInvalidate(sampleBufferRef);
                 CFRelease(sampleBufferRef);
             });
-
             return YES;
         }
         else
